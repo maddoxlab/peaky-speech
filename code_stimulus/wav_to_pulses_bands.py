@@ -32,17 +32,18 @@ overwrite_file = True
 save_hdf5 = True
 
 story = 'alchemyst'  # alchemyst (male narrator) or wrinkle (female narrator)
-main_path = '/mnt/data/abr_peakyspeech/'
+narrator = 'male'
+main_path = '/mnt/data/abr_pip_speech_bands/'
 wav_in_path = main_path + 'audio_books/{}/'.format(story)
 out_path = '/mnt/data/abr_peakyspeech/stimuli/{}/'.format(story)
 
 start_file = 0
-n_trials = 120
+n_trials = 1
 
 # %% Set up the bands and f_shifts
 
-fs_filt = 44100
-# fs_filt = 48000  # used a different fs for the pilot study
+fs_filt = 44100  # used for main experiments
+# fs_filt = 48000  # used for pilot and all next experiments
 n_filt = int(fs_filt * 5e-3)
 n_filt += ((n_filt + 1) % 2)  # must be odd
 freq = np.arange(n_filt) / float(n_filt) * fs_filt
@@ -155,12 +156,12 @@ plt.close()
 # %% make the stimuli
 
 files = sorted(glob(wav_in_path + story + '*.wav'))
-if story == 'alchemyst':
+if narrator == 'male':
     f0_min, f0_max = 60, 350
-elif story == 'wrinkle':
+elif narrator == 'female':
     f0_min, f0_max = 90, 500
 slop = 1.6
-n_ep_max = 120
+n_ep_max = 1
 
 for fi, fn in enumerate(files[start_file:n_trials]):
     print('\n===== %s =====\n' % fn.split('/')[-1])
@@ -170,6 +171,12 @@ for fi, fn in enumerate(files[start_file:n_trials]):
         shutil.copyfile(fn, temp_dir + '/stim.wav')
         # call the praat processing
         wav_path = temp_dir + '/stim'
+        # pulls actual f0 min, max to send to next praat code
+        parselmouth.praat.run_file('wav_to_pitch.praat', '%s' % wav_path,
+                                   str(f0_min), str(f0_max))
+        with open(wav_path + '.Pitch') as fid:
+            pitch = list(np.copy(fid.readlines()))[0][:-1]
+        f0_min, f0_max, f_mean, f_std = [float(d) for d in pitch.split('_')]
         parselmouth.praat.run_file('wav_to_pulses.praat', '%s' % wav_path,
                                    str(f0_min), str(f0_max))
         # read in the pulse times
@@ -187,6 +194,18 @@ for fi, fn in enumerate(files[start_file:n_trials]):
     x = x[0]
     x *= 0.01 / x.std()  # normalize to rms = 0.01
 
+    # %% pad stimulus to make sure long enough for f shifts
+    # Pad/Concatenate zeros to improve frequency resolution
+    # Desired duration is the based on the max_f of 0.05
+    # Need twice the desired duration of 20s minus the stimulus duration
+    stim_dur = len(x)
+    desired_dur = 40 * fs
+
+    if stim_dur < desired_dur:
+        pts_rqd = desired_dur - stim_dur
+        x = np.pad(x, (0, pts_rqd), 'constant', constant_values=0)
+        # zero_pts = np.zeros([pts_rqd])
+        # x = np.concatenate((x, zero_pts))
     # %% smooth the pulses
     pulse_times_fix = np.copy(pulse_times)
     n_smooth_iter = 10
@@ -198,8 +217,11 @@ for fi, fn in enumerate(files[start_file:n_trials]):
                     < np.log2(slop):
                 pulse_times_fix[pii] = np.mean(
                     pulse_times_fix_start[pii - 1:pii + 1 + 1])
-    pulse_inds = np.round(pulse_times_fix * fs).astype(int)
+    # unique - due to error when 2 pulse times round to the same integer
+    pulse_inds = np.unique(np.round(pulse_times_fix * fs).astype(int))
     pulse_inds_unfix = np.round(pulse_times * fs).astype(int)
+    # Need to ensure pulse_inds and pulse_times_fix are the same length
+    pulse_times_fix = np.unique(pulse_times_fix)
 
     # %% find the gaps for sign reversals (helps mitigate artifact)
     b_env, a_env = sig.butter(1, 6 / (fs / 2.))
@@ -221,6 +243,15 @@ for fi, fn in enumerate(files[start_file:n_trials]):
                                      scaling='spectrum', window='hamming')
     phase = np.nan * np.ones((n_f0 + n_f0_fake, x.shape[-1]))
     breaks = np.where(np.diff(pulse_times_fix) >= 1. / f0_min)[0]
+
+    if 0 not in breaks:
+        # add first and last element in pulse_times_fix
+        breaks = np.insert(breaks, [0], [0])
+        print('Adding first element of pulse_times to breaks.')
+    if pulse_times_fix.size - 1 not in breaks:
+        # add first and last element in pulse_times_fix
+        breaks = np.insert(breaks, [breaks.size], [pulse_times_fix.size - 1])
+        print('Adding last element of pulse_times to breaks.')
 
     mixer = np.zeros(x.shape)
     for bii in range(len(breaks) - 1):
@@ -267,6 +298,8 @@ for fi, fn in enumerate(files[start_file:n_trials]):
     phase_orig = np.copy(phase[0])
 
     # %% make the new band phases and pulse_inds
+    # This part of the coded was edited to improve computation time and
+    # allow shorter stimuli to be processed.
     print('make new band phases and pulse_inds')
     f_shift_max = 1
     f_shift_f_min = 0.0  # if 0 will use next highest frequency bin
@@ -287,26 +320,34 @@ for fi, fn in enumerate(files[start_file:n_trials]):
         phase[f0_ind] = phase_orig + (
                 2 * np.pi * np.cumsum(f_shift[f0_ind]) / float(fs)
                 + np.random.rand() * 2 * np.pi)
-    f0 = np.diff(phase_orig, axis=-1) * fs / 2 / np.pi
-    t0 = np.arange(phase.shape[-1] - 1) / float(fs)
 
     # split into true (for stimuli) & fake f0 (used to derive common component)
     phase_fake_pulses = np.copy(phase)[n_f0:]
     phase = phase[:n_f0]
+
+    # extract f0 and t0 from the pulse inds
+    f0 = np.diff(phase_orig, axis=-1) * fs / 2 / np.pi
+    t0 = np.arange(phase.shape[-1] - 1) / float(fs)
+    f0 = f0[pulse_inds]
+    t0 = t0[pulse_inds]
+    t0 = t0[np.invert(np.isnan(f0))]
+    f0 = f0[np.invert(np.isnan(f0))]
 
     print('Computing harmonic amplitude envelopes')
     f_harm_max = np.minimum(fc_band[-1] * 2, fs / 2. - 1)
     n_harm = int(np.floor(f_harm_max / f0_min))
     amp0 = np.zeros((n_harm, len(x)))
     for hi in range(n_harm):
-        # rather than interp at every point, take the pulse points and then
-        # cubic spline interpolate each of those. would be faster.
         f = f0 * (hi + 1)
-        fi = np.where(f < fs)[0]
-        amp0[hi, fi] = interp(np.transpose([f[fi], t0[fi]])) ** 0.5
-    amp0[:, np.isnan(amp0[0])] = 0
-    bplp, aplp = sig.butter(1, 70 / (fs / 2.))
-    amp0 = np.array([sig.filtfilt(bplp, aplp, amp) for amp in amp0])
+        amp0_temp = interp(np.transpose([f, t0])) ** 0.5
+        amp0_interp = interp1d(t0, amp0_temp, kind='cubic', bounds_error=False,
+                               fill_value=0)
+        amp0_new = np.arange(stim_dur) / float(fs)
+        amp0[hi, :stim_dur] = amp0_interp(amp0_new)
+    # No longer need these lines - interp already smooths the amp0 waveform
+    # amp0[:, np.isnan(amp0[0])] = 0
+    # bplp, aplp = sig.butter(1, 70 / (fs / 2.))
+    # amp0 = np.array([sig.filtfilt(bplp, aplp, amp) for amp in amp0])
 
     print('Generating the harmonics')
     x_harm = np.zeros(phase.shape)
@@ -353,14 +394,24 @@ for fi, fn in enumerate(files[start_file:n_trials]):
             x_harm[:2], np.atleast_2d(h_single[0]), 'same') + (1 - mixer[0]) *
             sig.fftconvolve(x, h_single[1], 'same'))
 
+    x_play_band *= flip_sign
+    x_play_single *= flip_sign
+    x *= flip_sign
+
+    # %% Revert back to original length
+    if stim_dur < desired_dur:
+        x = x[:stim_dur]
+        x_play_single = x_play_single[..., :stim_dur]
+        x_play_band = x_play_band[..., :stim_dur]
+        phase = phase[..., :stim_dur]
+        phase_fake_pulses = phase_fake_pulses[..., :stim_dur]
+        mixer = mixer[..., :stim_dur]
+
+    # %% Create pulse trains for deriving peaky speech responses
     pulse_inds = [np.where(np.diff(np.mod(phase[bi], 2 * np.pi)) < 0)[0]
                   for bi in range(n_f0)]
     fake_pulse_inds = [np.where(np.diff(np.mod(
         phase_fake_pulses[bi], 2 * np.pi)) < 0)[0] for bi in range(n_f0_fake)]
-
-    x_play_band *= flip_sign
-    x_play_single *= flip_sign
-    x *= flip_sign
 
     # %% save files
     print('saving')
@@ -387,7 +438,6 @@ for fi, fn in enumerate(files[start_file:n_trials]):
         write_wav(out_path + '{}_wav/unaltered/'.format(story) +
                   fn.split('/')[-1][:-4] + '_unaltered' + name_ears +
                   fn.split('/')[-1][-4:], x, fs, overwrite=overwrite_file)
-
     if save_hdf5:
         write_hdf5(out_path + '{}_hdf5/hdf5_full/'.format(story) +
                    fn.split('/')[-1][:-4] + '_bands' + name_band + '.hdf5',
@@ -427,6 +477,7 @@ for fi, fn in enumerate(files[start_file:n_trials]):
             top_width=top_width,
             trans_width=trans_width,
             n_filt=n_filt), overwrite=overwrite_file)
+
         write_hdf5(out_path + '{}_hdf5/hdf5_reduced/'.format(story) +
                    fn.split('/')[-1][:-4] + '_bands' + name_band +
                    '_reduced.hdf5', dict(
