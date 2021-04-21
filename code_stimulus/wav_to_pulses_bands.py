@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Updated on Wed Sep 23 18:13:18 2020
-@author: rkmaddox; mpolonenko
+Updated on Wed Apr 21 13:14:13 2021
 
+@author: mpolonenko; rkmaddox
 """
 
 import numpy as np
@@ -24,9 +24,11 @@ plt.ion()
 band_type = 'original'  # original (4-band) or audiological (5-band)
 n_ears = 1  # 1 (diotic) or 2 (dichotic)
 
-save_unaltered = False
+only_bbn = False  # if you only want to make broadband, not multiband (faster)
+
+save_unaltered = True
 save_broadband = True
-save_multiband = True
+save_multiband = False
 
 overwrite_file = True
 save_hdf5 = True
@@ -38,7 +40,7 @@ wav_in_path = main_path + 'audio_books/{}/'.format(story)
 out_path = '/mnt/data/abr_peakyspeech/stimuli/{}/'.format(story)
 
 start_file = 0
-n_trials = 1
+n_trials = 120
 
 # %% Set up the bands and f_shifts
 
@@ -67,8 +69,12 @@ else:
     f0_band = np.repeat(fc_band, n_ears)
 
 n_band = len(fc_band) - 1
-n_f0 = n_ears * n_band  # would just be n_ears for only broadband
-n_f0_fake = 6  # number of fake pulse trains to calculate common component
+if only_bbn:
+    n_f0 = n_ears
+    n_f0_fake = 0
+else:
+    n_f0 = n_ears * n_band  # would just be n_ears for only broadband
+    n_f0_fake = 6  # number of fake pulse trains to calculate common component
 
 # %% Make band filters
 
@@ -122,9 +128,8 @@ plt.xlim([0.1, 12e3])
 plt.ylim([-60, 6])
 plt.ylabel('Gain (dB)')
 plt.title('Actual frequency response')
-plt.tight_layout(0.2)
-plt.savefig(out_path + 'filters_broadband' + name_band + '.png',
-            overwrite=overwrite_file)
+plt.tight_layout(pad=0.2)
+plt.savefig(out_path + 'filters_broadband' + name_band + '.png')
 plt.close()
 
 # plot multiband filters
@@ -148,9 +153,8 @@ plt.xlim([0.1, 12e3])
 plt.ylim([-60, 6])
 plt.ylabel('Gain (dB)')
 plt.title('Actual frequency response')
-plt.tight_layout(0.2)
-plt.savefig(out_path + 'filters_multiband' + name_band + '.png',
-            overwrite=overwrite_file)
+plt.tight_layout(pad=0.2)
+plt.savefig(out_path + 'filters_multiband' + name_band + '.png')
 plt.close()
 
 # %% make the stimuli
@@ -204,8 +208,7 @@ for fi, fn in enumerate(files[start_file:n_trials]):
     if stim_dur < desired_dur:
         pts_rqd = desired_dur - stim_dur
         x = np.pad(x, (0, pts_rqd), 'constant', constant_values=0)
-        # zero_pts = np.zeros([pts_rqd])
-        # x = np.concatenate((x, zero_pts))
+
     # %% smooth the pulses
     pulse_times_fix = np.copy(pulse_times)
     n_smooth_iter = 10
@@ -226,7 +229,8 @@ for fi, fn in enumerate(files[start_file:n_trials]):
     # %% find the gaps for sign reversals (helps mitigate artifact)
     b_env, a_env = sig.butter(1, 6 / (fs / 2.))
     env = sig.filtfilt(b_env, a_env, np.abs(x))
-    flip_regions = np.where(env < .01 * np.median(env))[0]
+    flip_regions = np.where(env[:stim_dur] < .01 * np.median(
+        env[:stim_dur]))[0]
     flip_inds = flip_regions[np.where(np.diff(flip_regions) > 1)[0] - 1]
     flip_spikes = np.zeros(env.shape)
     flip_spikes[flip_inds] = 1
@@ -370,12 +374,13 @@ for fi, fn in enumerate(files[start_file:n_trials]):
 
     # filter the different f0_bands
     x_harm_band = np.zeros((n_band, n_ears, len(x)))
-    f0_ind = 0
-    for band_ind in range(n_band):
-        for ear_ind in range(n_ears):
-            x_harm_band[band_ind, ear_ind] = sig.fftconvolve(
-                x_harm[f0_ind], h_band[band_ind], 'same')
-            f0_ind += 1
+    if not only_bbn:
+        f0_ind = 0
+        for band_ind in range(n_band):
+            for ear_ind in range(n_ears):
+                x_harm_band[band_ind, ear_ind] = sig.fftconvolve(
+                    x_harm[f0_ind], h_band[band_ind], 'same')
+                f0_ind += 1
     if n_ears == 1:
         x_harm_band = x_harm_band.mean(1)
     # %% combine the different bands, as well as voiced/voiceless segments
@@ -403,15 +408,27 @@ for fi, fn in enumerate(files[start_file:n_trials]):
         x = x[:stim_dur]
         x_play_single = x_play_single[..., :stim_dur]
         x_play_band = x_play_band[..., :stim_dur]
+        phase_orig = phase_orig[:stim_dur]
         phase = phase[..., :stim_dur]
         phase_fake_pulses = phase_fake_pulses[..., :stim_dur]
         mixer = mixer[..., :stim_dur]
+        x_harm = x_harm[..., :stim_dur]
+        x_harm_band = x_harm_band[..., :stim_dur]
+        x_harm_mix = x_harm_mix[..., :stim_dur]
+        flip_sign = flip_sign[..., :stim_dur]
 
     # %% Create pulse trains for deriving peaky speech responses
     pulse_inds = [np.where(np.diff(np.mod(phase[bi], 2 * np.pi)) < 0)[0]
                   for bi in range(n_f0)]
     fake_pulse_inds = [np.where(np.diff(np.mod(
         phase_fake_pulses[bi], 2 * np.pi)) < 0)[0] for bi in range(n_f0_fake)]
+
+    # %% if selected only_bbn
+    if only_bbn:
+        x_harm_band = []
+        x_harm_mix = []
+        x_play_band = []
+        phase_fake_pulses = []
 
     # %% save files
     print('saving')
@@ -453,6 +470,8 @@ for fi, fn in enumerate(files[start_file:n_trials]):
             x_play_single=x_play_single,
             x=x,
             fs=fs,
+            flip_inds=flip_inds,
+            flip_sign=flip_sign,
             f0_min=f0_min,
             f0_max=f0_max,
             n_smooth_iter=n_smooth_iter,
