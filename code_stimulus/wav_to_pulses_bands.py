@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Updated on Wed Apr 21 13:14:13 2021
+Updated on Mon May  3 20:01:42 2021
 
 @author: mpolonenko; rkmaddox
 """
@@ -28,7 +28,7 @@ only_bbn = False  # if you only want to make broadband, not multiband (faster)
 
 save_unaltered = True
 save_broadband = True
-save_multiband = False
+save_multiband = True
 
 overwrite_file = True
 save_hdf5 = True
@@ -40,7 +40,7 @@ wav_in_path = main_path + 'audio_books/{}/'.format(story)
 out_path = '/mnt/data/abr_peakyspeech/stimuli/{}/'.format(story)
 
 start_file = 0
-n_trials = 120
+n_trials = np.inf
 
 # %% Set up the bands and f_shifts
 
@@ -160,14 +160,16 @@ plt.close()
 # %% make the stimuli
 
 files = sorted(glob(wav_in_path + story + '*.wav'))
-if narrator == 'male':
-    f0_min, f0_max = 60, 350
-elif narrator == 'female':
-    f0_min, f0_max = 90, 500
-slop = 1.6
-n_ep_max = 1
+if n_trials == np.inf:
+    n_trials = len(files)
 
 for fi, fn in enumerate(files[start_file:n_trials]):
+    if narrator == 'male':
+        f0_min, f0_max = 60, 350
+    elif narrator == 'female':
+        f0_min, f0_max = 90, 500
+    slop = 1.6
+    n_ep_max = 1
     print('\n===== %s =====\n' % fn.split('/')[-1])
     print('analyzing pulses')
     temp_dir = tempfile.mkdtemp(prefix='wav_to_pulses')
